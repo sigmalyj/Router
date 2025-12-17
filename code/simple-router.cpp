@@ -93,6 +93,8 @@ SimpleRouter::handlePacket(const Buffer& packet, const std::string& inIface)
             sendPacket(p, pkt.iface);
           }
         }
+        // ARP request satisfied; remove to avoid re-sending queued packets (prevents ping DUPs)
+        m_arp.removeRequest(req);
       }
     }
   } else if (type == ethertype_ip) {
