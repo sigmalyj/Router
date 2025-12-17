@@ -245,20 +245,9 @@ ArpCache::ticker()
 {
   while (!m_shouldStop) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    {
-      std::lock_guard<std::mutex> lock(m_mutex);
-
-      auto now = steady_clock::now();
-
-      for (auto& entry : m_cacheEntries) {
-        if (entry->isValid && (now - entry->timeAdded > SR_ARPCACHE_TO)) {
-          entry->isValid = false;
-        }
-      }
-
-      periodicCheckArpRequestsAndCacheEntries();
-    }
+    // periodicCheckArpRequestsAndCacheEntries() handles locking;
+    // avoid double-locking m_mutex in this thread.
+    periodicCheckArpRequestsAndCacheEntries();
   }
 }
 
