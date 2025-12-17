@@ -200,6 +200,9 @@ SimpleRouter::handlePacket(const Buffer& packet, const std::string& inIface)
               outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
 
               sendPacket(icmpPkt, rt.ifName);
+            } else {
+              // No ARP entry yet; queue and let ARP resolution proceed.
+              m_arp.queueRequest(nextHop, icmpPkt, rt.ifName);
             }
           }
         } catch (...) {}
@@ -249,6 +252,8 @@ SimpleRouter::handlePacket(const Buffer& packet, const std::string& inIface)
               outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
 
               sendPacket(icmpPkt, rt.ifName);
+            } else {
+              m_arp.queueRequest(nextHop, icmpPkt, rt.ifName);
             }
           }
         } catch (...) {}
@@ -321,6 +326,8 @@ SimpleRouter::handlePacket(const Buffer& packet, const std::string& inIface)
               outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
 
               sendPacket(icmpPkt, rt.ifName);
+            } else {
+              m_arp.queueRequest(nextHop, icmpPkt, rt.ifName);
             }
           }
         } catch (...) {}
