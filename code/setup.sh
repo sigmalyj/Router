@@ -12,7 +12,7 @@ sudo apt-get -y install libzeroc-ice35-dev libboost-all-dev
 # POX
 sudo rm -Rf /opt/pox
 sudo mkdir -p /opt/pox
-sudo git clone -b eel http://github.com/noxrepo/pox /opt/pox
+sudo git clone -b eel http://githubfast.com/noxrepo/pox /opt/pox
 
 
 pip install ucla-cs118

@@ -1,0 +1,19 @@
+POX 0.5.0 (eel) / Copyright 2011-2014 James McCauley, et al.
+INFO:.home.ubuntu.miniconda3.envs.router.lib.python2.7.site-packages.ucla_cs118.pox_rpc_server:Starting packet redirector...
+-- 12/16/25 11:48:35.721 pox_rpc_server: Network: listening for tcp connections
+   local address = 127.0.0.1:8888
+-- 12/16/25 11:48:35.722 pox_rpc_server: Network: published endpoints for object adapter `SimpleRouter':
+   tcp -h 127.0.0.1 -p 8888 -t 60000
+-- 12/16/25 11:48:35.722 pox_rpc_server: Network: accepting tcp connections at 127.0.0.1:8888
+DEBUG:core:POX 0.5.0 (eel) going up...
+DEBUG:core:Running on CPython (2.7.18/Nov 25 2022 06:27:37)
+DEBUG:core:Platform is Linux-6.8.0-71-generic-x86_64-with-debian-trixie-sid
+INFO:core:POX 0.5.0 (eel) is up.
+DEBUG:openflow.of_01:Listening on 0.0.0.0:6633
+-- 12/16/25 11:48:56.304 pox_rpc_server: Network: accepted tcp connection
+   local address = 127.0.0.1:8888
+   remote address = 127.0.0.1:36280
+DEBUG:.home.ubuntu.miniconda3.envs.router.lib.python2.7.site-packages.ucla_cs118.pox_rpc_server:Got connection from: tcp -h 127.0.0.1 -p 8888 -t 60000 (id: F2E0A83C-073A-4729-94E3-A0ED617EC48B)
+INFO:openflow.of_01:[86-fc-ff-32-55-4a 2] connected
+DEBUG:.home.ubuntu.miniconda3.envs.router.lib.python2.7.site-packages.ucla_cs118.pox_rpc_server:Connection UP [86-fc-ff-32-55-4a 2]
+DEBUG:.home.ubuntu.miniconda3.envs.router.lib.python2.7.site-packages.ucla_cs118.pox_rpc_server:Request requestReset with 3 interfaces

@@ -35,10 +35,296 @@ SimpleRouter::handlePacket(const Buffer& packet, const std::string& inIface)
     return;
   }
 
-  std::cerr << getRoutingTable() << std::endl;
+  if (packet.size() < sizeof(ethernet_hdr)) return;
 
-  // FILL THIS IN
+  ethernet_hdr* eth = (ethernet_hdr*)packet.data();
+  uint16_t type = ntohs(eth->ether_type);
 
+  if (type == ethertype_arp) {
+    if (packet.size() < sizeof(ethernet_hdr) + sizeof(arp_hdr)) return;
+    arp_hdr* arp = (arp_hdr*)(packet.data() + sizeof(ethernet_hdr));
+
+    if (ntohs(arp->arp_hrd) != arp_hrd_ethernet ||
+        ntohs(arp->arp_pro) != ethertype_ip ||
+        arp->arp_hln != ETHER_ADDR_LEN ||
+        arp->arp_pln != 4) {
+      return;
+    }
+
+    uint16_t op = ntohs(arp->arp_op);
+    if (op == arp_op_request) {
+      uint32_t targetIp = arp->arp_tip;
+      const Interface* targetIface = findIfaceByIp(targetIp);
+      if (targetIface) {
+        Buffer replyPkt(sizeof(ethernet_hdr) + sizeof(arp_hdr));
+        ethernet_hdr* replyEth = (ethernet_hdr*)replyPkt.data();
+        arp_hdr* replyArp = (arp_hdr*)(replyPkt.data() + sizeof(ethernet_hdr));
+
+        memcpy(replyEth->ether_dhost, arp->arp_sha, ETHER_ADDR_LEN);
+        memcpy(replyEth->ether_shost, targetIface->addr.data(), ETHER_ADDR_LEN);
+        replyEth->ether_type = htons(ethertype_arp);
+
+        replyArp->arp_hrd = htons(arp_hrd_ethernet);
+        replyArp->arp_pro = htons(ethertype_ip);
+        replyArp->arp_hln = ETHER_ADDR_LEN;
+        replyArp->arp_pln = 4;
+        replyArp->arp_op = htons(arp_op_reply);
+        memcpy(replyArp->arp_sha, targetIface->addr.data(), ETHER_ADDR_LEN);
+        replyArp->arp_sip = targetIface->ip;
+        memcpy(replyArp->arp_tha, arp->arp_sha, ETHER_ADDR_LEN);
+        replyArp->arp_tip = arp->arp_sip;
+
+        sendPacket(replyPkt, inIface);
+      }
+    } else if (op == arp_op_reply) {
+      uint32_t senderIp = arp->arp_sip;
+      Buffer senderMac(arp->arp_sha, arp->arp_sha + ETHER_ADDR_LEN);
+
+      auto req = m_arp.insertArpEntry(senderMac, senderIp);
+      if (req) {
+        for (const auto& pkt : req->packets) {
+          Buffer p = pkt.packet;
+          ethernet_hdr* pEth = (ethernet_hdr*)p.data();
+          memcpy(pEth->ether_dhost, senderMac.data(), ETHER_ADDR_LEN);
+
+          const Interface* outIface = findIfaceByName(pkt.iface);
+          if (outIface) {
+            memcpy(pEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+            sendPacket(p, pkt.iface);
+          }
+        }
+      }
+    }
+  } else if (type == ethertype_ip) {
+    if (packet.size() < sizeof(ethernet_hdr) + sizeof(ip_hdr)) return;
+    ip_hdr* ip = (ip_hdr*)(packet.data() + sizeof(ethernet_hdr));
+
+    uint16_t sum = ip->ip_sum;
+    ip->ip_sum = 0;
+    if (cksum(ip, ip->ip_hl * 4) != sum) {
+      return;
+    }
+    ip->ip_sum = sum;
+
+    if (packet.size() < sizeof(ethernet_hdr) + ntohs(ip->ip_len)) return;
+
+    const Interface* destIface = findIfaceByIp(ip->ip_dst);
+    if (destIface) {
+      if (ip->ip_p == ip_protocol_icmp) {
+        size_t ipHeaderLen = ip->ip_hl * 4;
+        if (packet.size() < sizeof(ethernet_hdr) + ipHeaderLen + sizeof(icmp_hdr)) return;
+
+        icmp_hdr* icmp = (icmp_hdr*)(packet.data() + sizeof(ethernet_hdr) + ipHeaderLen);
+        if (icmp->icmp_type == 8) {
+          uint16_t icmpSum = icmp->icmp_sum;
+          icmp->icmp_sum = 0;
+          size_t icmpLen = ntohs(ip->ip_len) - ipHeaderLen;
+          if (cksum(icmp, icmpLen) != icmpSum) return;
+
+          Buffer replyPkt = packet;
+          ethernet_hdr* rEth = (ethernet_hdr*)replyPkt.data();
+          ip_hdr* rIp = (ip_hdr*)(replyPkt.data() + sizeof(ethernet_hdr));
+          icmp_hdr* rIcmp = (icmp_hdr*)(replyPkt.data() + sizeof(ethernet_hdr) + ipHeaderLen);
+
+          rIp->ip_dst = ip->ip_src;
+          rIp->ip_src = ip->ip_dst;
+          rIp->ip_ttl = 64;
+          rIp->ip_sum = 0;
+          rIp->ip_sum = cksum(rIp, ipHeaderLen);
+
+          rIcmp->icmp_type = 0;
+          rIcmp->icmp_code = 0;
+          rIcmp->icmp_sum = 0;
+          rIcmp->icmp_sum = cksum(rIcmp, icmpLen);
+
+          try {
+            RoutingTableEntry rt = m_routingTable.lookup(rIp->ip_dst);
+            uint32_t nextHop = rt.gw ? rt.gw : rIp->ip_dst;
+            auto arpEntry = m_arp.lookup(nextHop);
+
+            const Interface* outIface = findIfaceByName(rt.ifName);
+            if (outIface) {
+              memcpy(rEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+              if (arpEntry) {
+                memcpy(rEth->ether_dhost, arpEntry->mac.data(), ETHER_ADDR_LEN);
+                sendPacket(replyPkt, rt.ifName);
+              } else {
+                m_arp.queueRequest(nextHop, replyPkt, rt.ifName);
+              }
+            }
+          } catch (...) {}
+        }
+      } else if (ip->ip_p == 6 || ip->ip_p == 17) {
+        // Send ICMP Port Unreachable
+        size_t icmpDataLen = sizeof(ip_hdr) + 8;
+        size_t totalLen = sizeof(ethernet_hdr) + sizeof(ip_hdr) + sizeof(icmp_t3_hdr);
+        Buffer icmpPkt(totalLen);
+
+        ethernet_hdr* outEth = (ethernet_hdr*)icmpPkt.data();
+        ip_hdr* outIp = (ip_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr));
+        icmp_t3_hdr* outIcmp = (icmp_t3_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr) + sizeof(ip_hdr));
+
+        try {
+          RoutingTableEntry rt = m_routingTable.lookup(ip->ip_src);
+          const Interface* outIface = findIfaceByName(rt.ifName);
+          if (outIface) {
+            uint32_t nextHop = rt.gw ? rt.gw : ip->ip_src;
+            auto arpEntry = m_arp.lookup(nextHop);
+
+            if (arpEntry) {
+              memcpy(outEth->ether_dhost, arpEntry->mac.data(), ETHER_ADDR_LEN);
+              memcpy(outEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+              outEth->ether_type = htons(ethertype_ip);
+
+              outIp->ip_v = 4;
+              outIp->ip_hl = 5;
+              outIp->ip_tos = 0;
+              outIp->ip_len = htons(sizeof(ip_hdr) + sizeof(icmp_t3_hdr));
+              outIp->ip_id = htons(0);
+              outIp->ip_off = htons(IP_DF);
+              outIp->ip_ttl = 64;
+              outIp->ip_p = ip_protocol_icmp;
+              outIp->ip_sum = 0;
+              outIp->ip_src = destIface->ip; // Use the destination IP as source
+              outIp->ip_dst = ip->ip_src;
+              outIp->ip_sum = cksum(outIp, sizeof(ip_hdr));
+
+              outIcmp->icmp_type = 3;
+              outIcmp->icmp_code = 3;
+              outIcmp->icmp_sum = 0;
+              outIcmp->unused = 0;
+              outIcmp->next_mtu = 0;
+              memcpy(outIcmp->data, ip, icmpDataLen);
+              outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
+
+              sendPacket(icmpPkt, rt.ifName);
+            }
+          }
+        } catch (...) {}
+      }
+    } else {
+      if (ip->ip_ttl <= 1) {
+        // Send ICMP Time Exceeded
+        size_t icmpDataLen = sizeof(ip_hdr) + 8;
+        size_t totalLen = sizeof(ethernet_hdr) + sizeof(ip_hdr) + sizeof(icmp_t3_hdr);
+        Buffer icmpPkt(totalLen);
+
+        ethernet_hdr* outEth = (ethernet_hdr*)icmpPkt.data();
+        ip_hdr* outIp = (ip_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr));
+        icmp_t3_hdr* outIcmp = (icmp_t3_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr) + sizeof(ip_hdr));
+
+        try {
+          RoutingTableEntry rt = m_routingTable.lookup(ip->ip_src);
+          const Interface* outIface = findIfaceByName(rt.ifName);
+          if (outIface) {
+            uint32_t nextHop = rt.gw ? rt.gw : ip->ip_src;
+            auto arpEntry = m_arp.lookup(nextHop);
+
+            if (arpEntry) {
+              memcpy(outEth->ether_dhost, arpEntry->mac.data(), ETHER_ADDR_LEN);
+              memcpy(outEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+              outEth->ether_type = htons(ethertype_ip);
+
+              outIp->ip_v = 4;
+              outIp->ip_hl = 5;
+              outIp->ip_tos = 0;
+              outIp->ip_len = htons(sizeof(ip_hdr) + sizeof(icmp_t3_hdr));
+              outIp->ip_id = htons(0);
+              outIp->ip_off = htons(IP_DF);
+              outIp->ip_ttl = 64;
+              outIp->ip_p = ip_protocol_icmp;
+              outIp->ip_sum = 0;
+              outIp->ip_src = iface->ip; // Use incoming interface IP
+              outIp->ip_dst = ip->ip_src;
+              outIp->ip_sum = cksum(outIp, sizeof(ip_hdr));
+
+              outIcmp->icmp_type = 11;
+              outIcmp->icmp_code = 0;
+              outIcmp->icmp_sum = 0;
+              outIcmp->unused = 0;
+              outIcmp->next_mtu = 0;
+              memcpy(outIcmp->data, ip, icmpDataLen);
+              outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
+
+              sendPacket(icmpPkt, rt.ifName);
+            }
+          }
+        } catch (...) {}
+        return;
+      }
+
+      ip->ip_ttl--;
+      ip->ip_sum = 0;
+      ip->ip_sum = cksum(ip, ip->ip_hl * 4);
+
+      try {
+        RoutingTableEntry rt = m_routingTable.lookup(ip->ip_dst);
+        uint32_t nextHop = rt.gw ? rt.gw : ip->ip_dst;
+        auto arpEntry = m_arp.lookup(nextHop);
+
+        const Interface* outIface = findIfaceByName(rt.ifName);
+        if (outIface) {
+          Buffer fwdPkt = packet;
+          ethernet_hdr* fEth = (ethernet_hdr*)fwdPkt.data();
+          memcpy(fEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+
+          if (arpEntry) {
+            memcpy(fEth->ether_dhost, arpEntry->mac.data(), ETHER_ADDR_LEN);
+            sendPacket(fwdPkt, rt.ifName);
+          } else {
+            m_arp.queueRequest(nextHop, fwdPkt, rt.ifName);
+          }
+        }
+      } catch (...) {
+        // Send ICMP Net Unreachable
+        size_t icmpDataLen = sizeof(ip_hdr) + 8;
+        size_t totalLen = sizeof(ethernet_hdr) + sizeof(ip_hdr) + sizeof(icmp_t3_hdr);
+        Buffer icmpPkt(totalLen);
+
+        ethernet_hdr* outEth = (ethernet_hdr*)icmpPkt.data();
+        ip_hdr* outIp = (ip_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr));
+        icmp_t3_hdr* outIcmp = (icmp_t3_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr) + sizeof(ip_hdr));
+
+        try {
+          RoutingTableEntry rt = m_routingTable.lookup(ip->ip_src);
+          const Interface* outIface = findIfaceByName(rt.ifName);
+          if (outIface) {
+            uint32_t nextHop = rt.gw ? rt.gw : ip->ip_src;
+            auto arpEntry = m_arp.lookup(nextHop);
+
+            if (arpEntry) {
+              memcpy(outEth->ether_dhost, arpEntry->mac.data(), ETHER_ADDR_LEN);
+              memcpy(outEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+              outEth->ether_type = htons(ethertype_ip);
+
+              outIp->ip_v = 4;
+              outIp->ip_hl = 5;
+              outIp->ip_tos = 0;
+              outIp->ip_len = htons(sizeof(ip_hdr) + sizeof(icmp_t3_hdr));
+              outIp->ip_id = htons(0);
+              outIp->ip_off = htons(IP_DF);
+              outIp->ip_ttl = 64;
+              outIp->ip_p = ip_protocol_icmp;
+              outIp->ip_sum = 0;
+              outIp->ip_src = iface->ip; // Use incoming interface IP
+              outIp->ip_dst = ip->ip_src;
+              outIp->ip_sum = cksum(outIp, sizeof(ip_hdr));
+
+              outIcmp->icmp_type = 3;
+              outIcmp->icmp_code = 0;
+              outIcmp->icmp_sum = 0;
+              outIcmp->unused = 0;
+              outIcmp->next_mtu = 0;
+              memcpy(outIcmp->data, ip, icmpDataLen);
+              outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
+
+              sendPacket(icmpPkt, rt.ifName);
+            }
+          }
+        } catch (...) {}
+      }
+    }
+  }
 }
 //////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////

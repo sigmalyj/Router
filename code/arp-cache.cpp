@@ -30,9 +30,124 @@ namespace simple_router {
 void
 ArpCache::periodicCheckArpRequestsAndCacheEntries()
 {
+  std::lock_guard<std::mutex> lock(m_mutex);
 
-  // FILL THIS IN
+  auto now = steady_clock::now();
 
+  // Check ARP requests
+  for (auto it = m_arpRequests.begin(); it != m_arpRequests.end(); ) {
+    auto& req = *it;
+    auto duration = std::chrono::duration_cast<seconds>(now - req->timeSent);
+
+    if (duration.count() >= 1) {
+      if (req->nTimesSent >= MAX_SENT_TIME) {
+        // Send ICMP Host Unreachable to all waiting packets
+        for (const auto& pkt : req->packets) {
+          if (pkt.packet.size() < sizeof(ethernet_hdr) + sizeof(ip_hdr)) continue;
+
+          ethernet_hdr* eth = (ethernet_hdr*)pkt.packet.data();
+          ip_hdr* ip = (ip_hdr*)(pkt.packet.data() + sizeof(ethernet_hdr));
+
+          try {
+            RoutingTableEntry rt = m_router.getRoutingTable().lookup(ip->ip_src);
+            const Interface* outIface = m_router.findIfaceByName(rt.ifName);
+            if (!outIface) continue;
+
+            uint32_t nextHop = rt.gw ? rt.gw : ip->ip_src;
+            auto arpEntry = lookup(nextHop);
+            
+            if (arpEntry) {
+              size_t icmpDataLen = sizeof(ip_hdr) + 8;
+              size_t totalLen = sizeof(ethernet_hdr) + sizeof(ip_hdr) + sizeof(icmp_t3_hdr);
+              Buffer icmpPkt(totalLen);
+
+              ethernet_hdr* outEth = (ethernet_hdr*)icmpPkt.data();
+              ip_hdr* outIp = (ip_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr));
+              icmp_t3_hdr* outIcmp = (icmp_t3_hdr*)(icmpPkt.data() + sizeof(ethernet_hdr) + sizeof(ip_hdr));
+
+              // Ethernet Header
+              memcpy(outEth->ether_dhost, arpEntry->mac.data(), ETHER_ADDR_LEN);
+              memcpy(outEth->ether_shost, outIface->addr.data(), ETHER_ADDR_LEN);
+              outEth->ether_type = htons(ethertype_ip);
+
+              // IP Header
+              outIp->ip_v = 4;
+              outIp->ip_hl = 5;
+              outIp->ip_tos = 0;
+              outIp->ip_len = htons(sizeof(ip_hdr) + sizeof(icmp_t3_hdr));
+              outIp->ip_id = htons(0);
+              outIp->ip_off = htons(IP_DF);
+              outIp->ip_ttl = 64;
+              outIp->ip_p = ip_protocol_icmp;
+              outIp->ip_sum = 0;
+              outIp->ip_src = outIface->ip;
+              outIp->ip_dst = ip->ip_src;
+              outIp->ip_sum = cksum(outIp, sizeof(ip_hdr));
+
+              // ICMP Header
+              outIcmp->icmp_type = 3; // Dest Unreachable
+              outIcmp->icmp_code = 1; // Host Unreachable
+              outIcmp->icmp_sum = 0;
+              outIcmp->unused = 0;
+              outIcmp->next_mtu = 0;
+              memcpy(outIcmp->data, ip, icmpDataLen);
+              outIcmp->icmp_sum = cksum(outIcmp, sizeof(icmp_t3_hdr));
+
+              m_router.sendPacket(icmpPkt, rt.ifName);
+            }
+          } catch (...) {
+            // Route not found
+          }
+        }
+        it = m_arpRequests.erase(it);
+      } else {
+        // Send ARP Request
+        if (!req->packets.empty()) {
+          std::string ifaceName = req->packets.front().iface;
+          const Interface* iface = m_router.findIfaceByName(ifaceName);
+          if (iface) {
+            Buffer arpPkt(sizeof(ethernet_hdr) + sizeof(arp_hdr));
+            ethernet_hdr* eth = (ethernet_hdr*)arpPkt.data();
+            arp_hdr* arp = (arp_hdr*)(arpPkt.data() + sizeof(ethernet_hdr));
+
+            // Ethernet Header
+            memset(eth->ether_dhost, 0xFF, ETHER_ADDR_LEN);
+            memcpy(eth->ether_shost, iface->addr.data(), ETHER_ADDR_LEN);
+            eth->ether_type = htons(ethertype_arp);
+
+            // ARP Header
+            arp->arp_hrd = htons(arp_hrd_ethernet);
+            arp->arp_pro = htons(ethertype_ip);
+            arp->arp_hln = ETHER_ADDR_LEN;
+            arp->arp_pln = 4;
+            arp->arp_op = htons(arp_op_request);
+            memcpy(arp->arp_sha, iface->addr.data(), ETHER_ADDR_LEN);
+            arp->arp_sip = iface->ip;
+            memset(arp->arp_tha, 0x00, ETHER_ADDR_LEN);
+            arp->arp_tip = req->ip;
+
+            m_router.sendPacket(arpPkt, ifaceName);
+
+            req->timeSent = now;
+            req->nTimesSent++;
+          }
+        }
+        ++it;
+      }
+    } else {
+      ++it;
+    }
+  }
+
+  // Check ARP cache entries
+  for (auto it = m_cacheEntries.begin(); it != m_cacheEntries.end(); ) {
+    auto duration = std::chrono::duration_cast<seconds>(now - (*it)->timeAdded);
+    if (duration >= SR_ARPCACHE_TO) {
+      it = m_cacheEntries.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 //////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////
